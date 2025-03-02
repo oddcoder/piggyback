@@ -24,15 +24,23 @@ fn get_piggyback_closure(attr: Attribute) -> TokenStream2 {
     l.tokens
 }
 
-fn piggyback_actions_to_expr(expr: &Expr, closures: &[TokenStream2]) -> TokenStream2 {
-    let mut base = quote!((|| {Ok(#expr)})());
+fn piggyback_actions_to_expr(
+    expr: &Expr,
+    closures: &[TokenStream2],
+    is_async: bool,
+) -> TokenStream2 {
+    let mut base = if is_async {
+        quote!(( || async {Ok(#expr)})().await)
+    } else {
+        quote!((|| {Ok(#expr)})())
+    };
     for closure in closures {
         base = quote! (#base.map_err(|e| {(#closure)(&e); e}));
     }
     base
 }
 
-fn piggyback_local(mut local: Local) -> Result<TokenStream2> {
+fn piggyback_local(mut local: Local, is_async: bool) -> Result<TokenStream2> {
     let span = local.span();
     let (pb_attrs, npb_attrs): (Vec<_>, Vec<_>) =
         local.attrs.into_iter().partition(is_piggyback_attr);
@@ -49,26 +57,27 @@ fn piggyback_local(mut local: Local) -> Result<TokenStream2> {
     };
     let attrs = local.attrs;
     let pat = local.pat;
-    let expr = piggyback_actions_to_expr(&init.expr, &pb_actions);
+    let expr = piggyback_actions_to_expr(&init.expr, &pb_actions, is_async);
     Ok(quote! {
         #(#attrs)*
         let #pat = #expr?;
     })
 }
 
-fn piggyback_stmt(stmt: Stmt) -> Result<TokenStream2> {
+fn piggyback_stmt(stmt: Stmt, is_async: bool) -> Result<TokenStream2> {
     match stmt {
-        Stmt::Local(local) => piggyback_local(local),
+        Stmt::Local(local) => piggyback_local(local, is_async),
         _ => Ok(quote! {#stmt}), //TODO
     }
 }
 
 fn piggyback_inner(item: ItemFn) -> Result<TokenStream2> {
+    let is_async = item.sig.asyncness.is_some();
     let stmts: Vec<_> = item
         .block
         .stmts
         .into_iter()
-        .map(piggyback_stmt)
+        .map(|s| piggyback_stmt(s, is_async))
         .map(|x| x.unwrap())
         .collect();
     let attrs = item.attrs;
